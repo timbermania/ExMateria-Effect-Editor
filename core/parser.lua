@@ -2049,6 +2049,7 @@ function M.parse_sound_definition_from_data(data, sound_def_ptr, section_size)
         data_offset = mem.buf_read32(data, sound_def_ptr + 0x0C),
         reserved = {},
         channel_offsets = {},
+        prefix_bytes = {},
         channels = {},
     }
 
@@ -2066,6 +2067,17 @@ function M.parse_sound_definition_from_data(data, sound_def_ptr, section_size)
     -- Read channel offsets
     for i = 0, def.num_channels - 1 do
         def.channel_offsets[i + 1] = mem.buf_read16(data, sound_def_ptr + 0x18 + (i * 2))
+    end
+
+    -- Capture bytes between the offsets-table end and the first channel.
+    -- FFT effects have a small gap here (e.g. protect's 3 bytes "00 80 80");
+    -- dropping it shifts every channel offset and silences audio.
+    local offsets_end = 0x18 + def.num_channels * 2
+    local first_ch_start = (def.num_channels > 0) and def.channel_offsets[1] or offsets_end
+    if first_ch_start > offsets_end then
+        for i = offsets_end, first_ch_start - 1 do
+            table.insert(def.prefix_bytes, mem.buf_read8(data, sound_def_ptr + i))
+        end
     end
 
     -- Parse each channel's SMD data
@@ -2117,6 +2129,7 @@ function M.parse_sound_definition_from_memory(base_addr, sound_def_ptr, section_
         data_offset = mem.read32(addr + 0x0C),
         reserved = {},
         channel_offsets = {},
+        prefix_bytes = {},
         channels = {},
     }
 
@@ -2134,6 +2147,17 @@ function M.parse_sound_definition_from_memory(base_addr, sound_def_ptr, section_
     -- Read channel offsets
     for i = 0, def.num_channels - 1 do
         def.channel_offsets[i + 1] = mem.read16(addr + 0x18 + (i * 2))
+    end
+
+    -- Capture bytes between the offsets-table end and the first channel.
+    -- FFT effects have a small gap here (e.g. protect's 3 bytes "00 80 80");
+    -- dropping it shifts every channel offset and silences audio.
+    local offsets_end = 0x18 + def.num_channels * 2
+    local first_ch_start = (def.num_channels > 0) and def.channel_offsets[1] or offsets_end
+    if first_ch_start > offsets_end then
+        for i = offsets_end, first_ch_start - 1 do
+            table.insert(def.prefix_bytes, mem.read8(addr + i))
+        end
     end
 
     -- Parse each channel's SMD data
@@ -2177,9 +2201,13 @@ function M.serialize_sound_definition(def)
 
     -- Header is 0x18 bytes + (num_channels * 2) for offset table
     local header_size = 0x18 + (def.num_channels * 2)
-    -- Align data_offset to typical value (round up to multiple of 4)
+    -- data_offset header field points to the byte just past the offsets table
+    -- (the start of the prefix_bytes, if any). Keep it aligned to 4 like ROM does.
     local new_data_offset = math.ceil(header_size / 4) * 4
-    local current_offset = new_data_offset
+    -- Channel data starts AFTER any prefix bytes that sat between the offsets
+    -- table and the first channel in the original file (3 bytes for protect, etc.)
+    local prefix = def.prefix_bytes or {}
+    local current_offset = new_data_offset + #prefix
 
     for i, ch in ipairs(def.channels) do
         local ch_raw = M.serialize_smd_opcodes(ch.opcodes)
@@ -2233,6 +2261,13 @@ function M.serialize_sound_definition(def)
         table.insert(result, 0)
     end
 
+    -- Prefix bytes (the gap between the offsets table and the first channel
+    -- in the original file). Without these, every channel offset shifts
+    -- by #prefix bytes and the SPU sequencer reads garbage -> silence.
+    for _, b in ipairs(prefix) do
+        table.insert(result, b)
+    end
+
     -- Channel data
     for i = 1, def.num_channels do
         local ch_raw = channel_bytes[i]
@@ -2263,12 +2298,18 @@ function M.copy_sound_definition(def)
         num_channels = def.num_channels,
         reserved = {},
         channel_offsets = {},
+        prefix_bytes = {},
         channels = {},
     }
 
     -- Copy reserved
     for i = 1, 8 do
         copy.reserved[i] = def.reserved[i]
+    end
+
+    -- Copy prefix_bytes (gap between offsets table and first channel)
+    for i = 1, #(def.prefix_bytes or {}) do
+        copy.prefix_bytes[i] = def.prefix_bytes[i]
     end
 
     -- Copy channel offsets

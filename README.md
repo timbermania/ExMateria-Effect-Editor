@@ -29,17 +29,24 @@ Part of the [ExMateria family](https://github.com/timbermania):
 
 ## Setup
 
-1. **Clone or download** this repo somewhere you can reach from
-   PCSX-Redux's filesystem. (UNC paths like
-   `\\wsl$\Ubuntu\home\you\effect-editor` work.)
+1. **Clone or download** this repo somewhere PCSX-Redux can read. Any
+   local filesystem works — Linux, macOS, or Windows. (On WSL, UNC paths
+   like `\\wsl$\Ubuntu\home\you\effect-editor` also work from a Windows
+   PCSX-Redux build.)
 2. **Copy `config_user.lua.example` → `config_user.lua`** and edit:
    - `DATA_PATH`: where the editor stores its captures, savestates, and
-     edits (default suggestion: `%APPDATA%\pcsx-effect-editor\`).
+     edits (default suggestion: `~/.local/share/pcsx-effect-editor/` on
+     Linux, `%APPDATA%\pcsx-effect-editor\` on Windows).
    - `EFFECT_FILES_PATH`: where your extracted `E###.BIN` files live
-     (e.g. `%APPDATA%\exmateria\assets\EFFECT\`).
+     (e.g. `~/.local/share/exmateria/assets/EFFECT/` on Linux,
+     `%APPDATA%\exmateria\assets\EFFECT\` on Windows).
 3. **Launch PCSX-Redux**, load FFT, open the Lua console
-   (`Tools → Show Lua Console`), and:
+   (`Tools → Show Lua Console`), and `dofile()` `main.lua` from wherever
+   you cloned the repo. Forward slashes work on every platform, e.g.:
    ```lua
+   -- Linux / macOS:
+   dofile("/home/you/effect-editor/main.lua")
+   -- Windows:
    dofile("C:/path/to/effect-editor/main.lua")
    ```
    The editor's main window should appear as an Imgui panel. Click

@@ -642,7 +642,12 @@ end
 -- Apply ALL edits (particle header + emitters + curves) to memory
 -- This is THE function to use when applying changes - ensures everything is in sync
 -- silent: if true, skip user-facing prints (used during automated operations)
-function M.apply_all_edits_to_memory(silent)
+-- opts.dry_writes: if true, perform the pause + refresh + return choreography
+--                  WITHOUT touching memory. Lets ee_test isolate "writes broke
+--                  audio" from "pause/refresh broke audio" without changing the
+--                  per-section bytes the SPU is reading.
+function M.apply_all_edits_to_memory(silent, opts)
+    opts = opts or {}
     if not EFFECT_EDITOR.memory_base or EFFECT_EDITOR.memory_base < 0x80000000 then
         log_error("No valid memory base address set. Load from memory first or set address.")
         return false
@@ -651,6 +656,14 @@ function M.apply_all_edits_to_memory(silent)
     PCSX.pauseEmulator()
     if not silent then log("Applying all edits to memory...") end
     MemUtils.refresh_mem()
+
+    if opts.dry_writes then
+        if not silent then
+            log("  DRY WRITES: paused + refreshed but performed NO section writes")
+        end
+        EFFECT_EDITOR.status_msg = "Applied: (dry writes — no memory changes)"
+        return true
+    end
 
     local base = EFFECT_EDITOR.memory_base
 
@@ -681,43 +694,60 @@ function M.apply_all_edits_to_memory(silent)
 
     local header = EFFECT_EDITOR.header
     local applied = {}
+    local skip = opts.skip or {}
 
     -- Phase 1: Structure changes (shifts memory, updates pointers)
-    for _, item in ipairs(apply_structure_changes(base, silent)) do
-        table.insert(applied, item)
+    if not skip.structure then
+        for _, item in ipairs(apply_structure_changes(base, silent)) do
+            table.insert(applied, item)
+        end
     end
 
     -- Phase 2: Write all data sections
-    -- Frames section (first in file order)
-    for _, item in ipairs(write_frames_section(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.frames then
+        for _, item in ipairs(write_frames_section(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-
-    -- Animation (sequences) section (after frames, before script)
-    for _, item in ipairs(write_animation_section(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.animation then
+        for _, item in ipairs(write_animation_section(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    -- Script bytecode (before particle system in file order)
-    for _, item in ipairs(write_script(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.script then
+        for _, item in ipairs(write_script(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_particle_system(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.particle then
+        for _, item in ipairs(write_particle_system(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_curves(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.curves then
+        for _, item in ipairs(write_curves(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_timeline_data(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.timeline then
+        for _, item in ipairs(write_timeline_data(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_time_scales(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.time_scales then
+        for _, item in ipairs(write_time_scales(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_flags(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.flags then
+        for _, item in ipairs(write_flags(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
-    for _, item in ipairs(write_sound_definition(base, header, silent)) do
-        table.insert(applied, item)
+    if not skip.sound_def then
+        for _, item in ipairs(write_sound_definition(base, header, silent)) do
+            table.insert(applied, item)
+        end
     end
 
     local applied_str = table.concat(applied, ", ")

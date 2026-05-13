@@ -111,6 +111,8 @@ EFFECT_EDITOR = {
     -- Test cycle settings
     test_quiet = true,          -- Suppress console logging during test cycle
     test_verbose = false,       -- Show detailed [DEBUG] messages
+    test_no_patch = false,      -- Test Effect button skips apply_all_edits (baseline sound check)
+    test_dry_writes = false,    -- Test Effect button still calls apply but writes nothing (pause/refresh A/B)
 
     -- Texture editing state
     texture_export_fingerprint = nil,  -- Hash of exported BMP (to detect changes)
@@ -216,6 +218,8 @@ function M.reset()
     EFFECT_EDITOR.auto_loop_last_time = 0
     EFFECT_EDITOR.test_quiet = true
     EFFECT_EDITOR.test_verbose = false
+    EFFECT_EDITOR.test_no_patch = false
+    EFFECT_EDITOR.test_dry_writes = false
     EFFECT_EDITOR.texture_export_fingerprint = nil
     EFFECT_EDITOR.texture_width = 0
     EFFECT_EDITOR.texture_height = 0

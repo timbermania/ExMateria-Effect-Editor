@@ -1,5 +1,5 @@
 -- utils/platform.lua
--- Cross-platform utilities for Windows and WSL
+-- Cross-platform utilities for Windows, WSL, and native Linux
 
 local M = {}
 
@@ -7,8 +7,8 @@ local M = {}
 -- Platform Detection
 --------------------------------------------------------------------------------
 
--- Detect if running on Windows or WSL
--- Returns "windows" or "wsl"
+-- Detect if running on Windows, WSL, or native Linux
+-- Returns "windows", "wsl", or "linux"
 function M.detect_platform()
     -- Check for Windows-specific environment variables
     local os_type = os.getenv("OS")
@@ -16,18 +16,24 @@ function M.detect_platform()
         return "windows"
     end
 
-    -- Check for WSL
+    -- Check for WSL (WSL2 always sets WSL_DISTRO_NAME)
     local wsl_distro = os.getenv("WSL_DISTRO_NAME")
     if wsl_distro then
         return "wsl"
     end
 
-    -- Fallback: check path separator
+    -- Check path separator — Windows uses backslash
     if package.config:sub(1, 1) == "\\" then
         return "windows"
     end
 
-    return "wsl"  -- Default to WSL for Linux-like environments
+    -- Native Linux (no APPDATA, no WSL_DISTRO_NAME, POSIX separator)
+    local home = os.getenv("HOME")
+    if home and home:sub(1, 1) == "/" then
+        return "linux"
+    end
+
+    return "wsl"  -- Conservative fallback
 end
 
 -- Cache the platform detection result
@@ -113,7 +119,10 @@ end
 -- Normalize path for current platform file operations
 function M.normalize_path(path)
     if not path then return nil end
-    -- PCSX-Redux runs on Windows, so always use backslashes for file I/O
+    if M.platform == "linux" then
+        return M.to_posix_path(path)
+    end
+    -- Windows / WSL: PCSX-Redux file I/O needs backslashes
     return M.to_win_path(path)
 end
 
@@ -123,19 +132,33 @@ end
 
 -- Ensure a directory exists (cross-platform)
 function M.ensure_dir(path)
+    if not path then return false end
+
+    if M.platform == "linux" then
+        local posix_path = M.to_posix_path(path)
+        -- Check existence first
+        local test_path = posix_path .. "/.dir_check_" .. tostring(os.time())
+        local f = io.open(test_path, "w")
+        if f then
+            f:close()
+            os.remove(test_path)
+            return true
+        end
+        os.execute('mkdir -p "' .. posix_path .. '"')
+        return true
+    end
+
     local win_path = M.to_win_path(path)
 
     -- First try to detect if directory already exists
-    -- by attempting to create a temp file
     local test_path = win_path .. "\\.dir_check_" .. tostring(os.time())
     local f = io.open(test_path, "w")
     if f then
         f:close()
         os.remove(test_path)
-        return true  -- Directory already exists
+        return true
     end
 
-    -- Directory doesn't exist - create it
     if M.platform == "windows" then
         os.execute('mkdir "' .. win_path .. '" 2>nul')
     else
@@ -153,6 +176,33 @@ end
 -- Returns a table of filenames (without path)
 function M.list_files(dir, extension)
     local files = {}
+
+    if M.platform == "linux" then
+        local posix_path = M.to_posix_path(dir)
+        local temp_file = "/tmp/pcsx_ee_list_" .. tostring(os.time()) .. ".txt"
+        local glob = extension and (posix_path .. extension) or (posix_path .. "*")
+        os.execute('ls -1 "' .. posix_path .. '" 2>/dev/null > "' .. temp_file .. '"')
+        local handle = io.open(temp_file, "r")
+        if handle then
+            for line in handle:lines() do
+                if line and #line > 0 then
+                    -- Filter by extension if provided (strip leading * from "*.json")
+                    if extension then
+                        local ext = extension:match("%*(.+)$") or extension
+                        if line:sub(-#ext) == ext then
+                            table.insert(files, line)
+                        end
+                    else
+                        table.insert(files, line)
+                    end
+                end
+            end
+            handle:close()
+            os.remove(temp_file)
+        end
+        return files
+    end
+
     local win_path = M.to_win_path(dir)
     local pattern = extension or "*"
 
@@ -170,7 +220,6 @@ function M.list_files(dir, extension)
 
     os.execute(cmd)
 
-    -- Read results from temp file
     local handle = io.open(temp_file, "r")
     if handle then
         for line in handle:lines() do
@@ -210,6 +259,14 @@ end
 
 -- Get the application data directory
 function M.get_appdata_dir()
+    -- Native Linux: use XDG config dir (~/.config)
+    if M.platform == "linux" then
+        local xdg = os.getenv("XDG_CONFIG_HOME")
+        if xdg then return xdg end
+        return M.get_home_dir() .. "/.config"
+    end
+
+    -- Windows / WSL: use APPDATA (e.g. C:\Users\...\AppData\Roaming)
     local appdata = os.getenv("APPDATA")
     if appdata then
         return M.to_posix_path(appdata)

@@ -285,6 +285,9 @@ print("[EffectEditor] Hooked into DrawImguiFrame")
 -- Workflow commands
 ee_test = workflow.ee_test
 ee_apply = workflow.ee_apply
+ee_verify_feds_roundtrip = workflow.ee_verify_feds_roundtrip
+ee_dump_audio_globals = workflow.ee_dump_audio_globals
+ee_diff_globals_around_apply = workflow.ee_diff_globals_around_apply
 
 -- File operations
 ee_load = file_ops.ee_load

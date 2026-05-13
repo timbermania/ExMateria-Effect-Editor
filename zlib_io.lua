@@ -99,14 +99,16 @@ function M.save_savestate_to_file(path)
     end
 
     local win_path = path:gsub("/", "\\")
+    -- On Linux, io.open needs forward slashes; on Windows/WSL use backslashes
+    local io_path = os.getenv("APPDATA") and win_path or path
 
     -- Check if file already exists and DELETE it first
-    local existing = io.open(win_path, "rb")
+    local existing = io.open(io_path, "rb")
     if existing then
         local existing_size = existing:seek("end")
         existing:close()
         log(string.format("  Existing file found (size: %d bytes) - DELETING first", existing_size or 0))
-        local deleted = os.remove(win_path)
+        local deleted = os.remove(io_path)
         if deleted then
             log("  File deleted successfully")
         else
@@ -144,7 +146,7 @@ function M.save_savestate_to_file(path)
     log("  File closed")
 
     -- Verify file was written
-    local verify = io.open(win_path, "rb")
+    local verify = io.open(io_path, "rb")
     if verify then
         local written_size = verify:seek("end")
         verify:close()

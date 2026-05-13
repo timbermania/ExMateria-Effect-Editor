@@ -33,7 +33,8 @@ end
 
 local function is_gzip_file(path)
     local win_path = path:gsub("/", "\\")
-    local f = io.open(win_path, "rb")
+    local io_path = os.getenv("APPDATA") and win_path or path
+    local f = io.open(io_path, "rb")
     if not f then return false end
     local magic = f:read(2)
     f:close()
@@ -101,11 +102,12 @@ function M.ee_reload(name, quiet)
 
     local path = config.SAVESTATE_PATH .. name .. ".sstate"
     local path_win = path:gsub("/", "\\")
+    local io_path = os.getenv("APPDATA") and path_win or path
 
     -- Check if file exists and get size
-    local f = io.open(path_win, "rb")
+    local f = io.open(io_path, "rb")
     if not f then
-        logging.log_error("Savestate file not found: " .. path_win)
+        logging.log_error("Savestate file not found: " .. io_path)
         return false
     end
     local file_size = f:seek("end")
@@ -220,9 +222,10 @@ local function ee_save_bin_and_meta(name, effect_idx)
         logging.log(string.format("  First 16 bytes to write: %s", hex))
 
         local win_path = bin_path:gsub("/", "\\")
-        local outfile = io.open(win_path, "wb")
+        local io_path = os.getenv("APPDATA") and win_path or bin_path
+        local outfile = io.open(io_path, "wb")
         if not outfile then
-            error("Could not create file: " .. win_path)
+            error("Could not create file: " .. io_path)
         end
         outfile:write(data_str)
         outfile:close()
@@ -345,7 +348,8 @@ function M.ee_save_bin_edited()
     -- Check savestate exists
     local ss_path = config.SAVESTATE_PATH .. name .. ".sstate"
     local ss_win_path = ss_path:gsub("/", "\\")
-    local ss_file = io.open(ss_win_path, "rb")
+    local ss_io_path = os.getenv("APPDATA") and ss_win_path or ss_path
+    local ss_file = io.open(ss_io_path, "rb")
     if not ss_file then
         logging.log_error("No savestate found! Use Raw Save first to create a session.")
         return false
@@ -393,7 +397,8 @@ function M.ee_save_bin_edited()
             local read_size = config.EFFECT_MAX_SIZE - 4
             local data_str = ffi.string(ffi.cast("char*", mem) + offset, read_size)
             local win_path = bin_path:gsub("/", "\\")
-            local outfile = io.open(win_path, "wb")
+            local io_path = os.getenv("APPDATA") and win_path or bin_path
+            local outfile = io.open(io_path, "wb")
             if outfile then
                 outfile:write(data_str)
                 outfile:close()

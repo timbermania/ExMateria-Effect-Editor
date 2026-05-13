@@ -73,9 +73,12 @@ local function update_auto_loop()
     if EFFECT_EDITOR.auto_loop_timer <= 0 then
         -- Reset timer
         EFFECT_EDITOR.auto_loop_timer = EFFECT_EDITOR.auto_loop_seconds
-        -- Trigger test cycle
+        -- Trigger test cycle (honor "No patch" + "Dry writes" toggles)
         if test_cycle_fn then
-            test_cycle_fn()
+            test_cycle_fn({
+                skip_patching = EFFECT_EDITOR.test_no_patch,
+                dry_writes = EFFECT_EDITOR.test_dry_writes,
+            })
         end
     end
 end
@@ -91,10 +94,15 @@ local function draw_top_control_bar()
     -- Get window width for right-alignment
     local window_width = imgui.GetWindowWidth()
 
-    -- Left side: Test Effect button + Quiet/Verbose checkboxes
+    -- Left side: Test Effect button + Quiet/Verbose/No-Patch/Dry-Writes checkboxes
     if has_session_name and has_memory_target then
         if imgui.Button("Test Effect", 100, 28) then
-            if test_cycle_fn then test_cycle_fn() end
+            if test_cycle_fn then
+                test_cycle_fn({
+                    skip_patching = EFFECT_EDITOR.test_no_patch,
+                    dry_writes = EFFECT_EDITOR.test_dry_writes,
+                })
+            end
             EFFECT_EDITOR.auto_loop_timer = EFFECT_EDITOR.auto_loop_seconds
             EFFECT_EDITOR.auto_loop_last_time = os.clock()
         end
@@ -104,6 +112,12 @@ local function draw_top_control_bar()
         imgui.SameLine()
         c, v = imgui.Checkbox("Verbose", EFFECT_EDITOR.test_verbose)
         if c then EFFECT_EDITOR.test_verbose = v end
+        imgui.SameLine()
+        c, v = imgui.Checkbox("No patch", EFFECT_EDITOR.test_no_patch)
+        if c then EFFECT_EDITOR.test_no_patch = v end
+        imgui.SameLine()
+        c, v = imgui.Checkbox("Dry writes", EFFECT_EDITOR.test_dry_writes)
+        if c then EFFECT_EDITOR.test_dry_writes = v end
     else
         -- Show placeholder text when not ready
         imgui.TextUnformatted("(Load effect first)")

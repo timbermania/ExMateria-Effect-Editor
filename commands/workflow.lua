@@ -29,9 +29,24 @@ end
 
 --------------------------------------------------------------------------------
 -- ee_test: Quick test cycle - reload savestate, apply changes, resume
+--
+-- opts.install_mute_hook: if true, install audio_record.mute_music() in the
+--   nextTick callback (after savestate reload). Off by default because the
+--   typical iteration loop uses a no-music-patched ISO; the music-mute hook
+--   has a hardcoded blacklist (resource_id ∈ {0, 283}) that silences valid
+--   effect sounds. Audio capture (ee_capture_audio_start) opts in.
+-- opts.skip_patching: if true, skip apply_all_edits_fn and the texture
+--   reload entirely. Just reload the savestate and resume. Useful for
+--   confirming what the unmodified ROM does (baseline / sanity check).
+-- opts.dry_writes: if true, still call apply_all_edits_fn but in
+--   dry-write mode (pauses + refreshes + returns without writing). Lets
+--   us A/B the pause/resume choreography against the actual writes when
+--   the writes produce byte-identical bytes (apply yields a bin that
+--   already matches the ROM) yet audio still breaks.
 --------------------------------------------------------------------------------
 
-function M.ee_test()
+function M.ee_test(opts)
+    opts = opts or {}
     -- Check quiet mode - only log if not quiet
     local quiet = EFFECT_EDITOR.test_quiet
 
@@ -59,10 +74,14 @@ function M.ee_test()
         return false
     end
 
-    -- Check savestate file exists before trying to reload
+    -- Check savestate file exists before trying to reload.
+    -- Pattern used elsewhere in this codebase: APPDATA env var is
+    -- only set on Windows; backslash-path on Windows, forward on
+    -- Linux (config.SAVESTATE_PATH already uses /).
     local ss_path = config.SAVESTATE_PATH .. EFFECT_EDITOR.session_name .. ".sstate"
     local ss_win_path = ss_path:gsub("/", "\\")
-    local ss_file = io.open(ss_win_path, "rb")
+    local ss_io_path = os.getenv("APPDATA") and ss_win_path or ss_path
+    local ss_file = io.open(ss_io_path, "rb")
     if ss_file then
         local ss_size = ss_file:seek("end")
         ss_file:close()
@@ -70,7 +89,7 @@ function M.ee_test()
             logging.log(string.format("  Savestate file: %d bytes", ss_size or 0))
         end
     else
-        logging.log_error(string.format("  Savestate file NOT FOUND: %s", ss_win_path))
+        logging.log_error(string.format("  Savestate file NOT FOUND: %s", ss_io_path))
         return false
     end
 
@@ -86,7 +105,13 @@ function M.ee_test()
     -- Need to wait a tick for savestate to fully load before writing
     if not quiet then logging.log("Scheduling Step 2 on nextTick...") end
     PCSX.nextTick(function()
-        if not quiet then logging.log("Step 2: Applying all edits to memory...") end
+        if not quiet then
+            if opts.skip_patching then
+                logging.log("Step 2: SKIPPING patching (baseline test, no apply_all_edits)")
+            else
+                logging.log("Step 2: Applying all edits to memory...")
+            end
+        end
 
         -- Verify effect is in memory after reload
         MemUtils.refresh_mem()
@@ -95,29 +120,32 @@ function M.ee_test()
             logging.log(string.format("  Post-reload lookup_table[%d]: 0x%08X", EFFECT_EDITOR.effect_id, lookup_base or 0))
         end
 
-        -- Apply structure changes FIRST (this may shift memory addresses)
-        if apply_all_edits_fn then
-            apply_all_edits_fn(true)  -- silent mode - we'll resume ourselves
-        end
-
-        -- Check for modified texture BMP and reload if needed
-        -- IMPORTANT: Must happen AFTER structure changes, otherwise memory shift overwrites texture!
-        if not quiet then logging.log("  Checking for texture changes...") end
-        if texture_ops then
-            local reloaded = texture_ops.maybe_reload_texture_before_test()
-            if reloaded and not quiet then
-                logging.log("  Reloaded modified texture from BMP")
+        if not opts.skip_patching then
+            -- Apply structure changes FIRST (this may shift memory addresses)
+            if apply_all_edits_fn then
+                apply_all_edits_fn(true, {dry_writes = opts.dry_writes})  -- silent
             end
-        else
-            if not quiet then logging.log("  texture_ops module not available") end
-        end
 
-        if not quiet then logging.log("Step 2 complete: all edits applied") end
+            -- Check for modified texture BMP and reload if needed
+            -- IMPORTANT: Must happen AFTER structure changes, otherwise memory shift overwrites texture!
+            if not quiet then logging.log("  Checking for texture changes...") end
+            if texture_ops then
+                local reloaded = texture_ops.maybe_reload_texture_before_test()
+                if reloaded and not quiet then
+                    logging.log("  Reloaded modified texture from BMP")
+                end
+            else
+                if not quiet then logging.log("  texture_ops module not available") end
+            end
+
+            if not quiet then logging.log("Step 2 complete: all edits applied") end
+        end
 
         -- Mute background music (must be AFTER savestate load)
-        -- Savestate restores game state, so we install mute hook here
-        -- Uses MIPS hook to mute music while preserving effect sounds
-        if audio_record then
+        -- Savestate restores game state, so we install mute hook here.
+        -- Opt-in only: the hook blacklists resource_id ∈ {0, 283} and will
+        -- silence valid effect sounds on a no-music-patched ISO.
+        if opts.install_mute_hook and audio_record then
             audio_record.mute_music()
             if not quiet then logging.log("  Music mute hook installed (effects preserved)") end
         end
@@ -145,6 +173,211 @@ function M.ee_apply()
     if apply_all_edits_fn then
         apply_all_edits_fn()
     end
+end
+
+--------------------------------------------------------------------------------
+-- ee_verify_feds_roundtrip: Prove parse→serialize of the feds section is a
+-- byte-identical no-op against the live memory bytes the SPU is reading.
+--
+-- Reads ground-truth bytes from base + header.sound_def_ptr (the same bytes
+-- a naked savestate replay sees), runs them through the parser and serializer
+-- used by ee_test, and reports any divergence (byte-level + structural).
+--------------------------------------------------------------------------------
+
+function M.ee_verify_feds_roundtrip()
+    if not parser then
+        print("[Verify] ERROR: parser module not injected")
+        return false
+    end
+    if not MemUtils then
+        print("[Verify] ERROR: MemUtils not injected")
+        return false
+    end
+    if not EFFECT_EDITOR.memory_base or EFFECT_EDITOR.memory_base < 0x80000000 then
+        print("[Verify] ERROR: no memory_base set. Capture an effect first.")
+        return false
+    end
+    local hdr = EFFECT_EDITOR.header
+    if not hdr then
+        print("[Verify] ERROR: no header loaded. Capture an effect first.")
+        return false
+    end
+
+    MemUtils.refresh_mem()
+    local base = EFFECT_EDITOR.memory_base
+    local size = hdr.texture_ptr - hdr.sound_def_ptr
+    local addr = base + hdr.sound_def_ptr
+
+    print(string.format("[Verify] feds region @ 0x%08X, size=%d bytes (texture_ptr - sound_def_ptr)",
+        addr, size))
+
+    -- 1. Snapshot ground-truth bytes from memory.
+    local orig_chars = {}
+    for i = 0, size - 1 do
+        orig_chars[i + 1] = string.char(MemUtils.read8(addr + i))
+    end
+    local orig = table.concat(orig_chars)
+
+    -- 2. Parse, then re-serialize using the same code path ee_test invokes.
+    local def = parser.parse_sound_definition_from_memory(base, hdr.sound_def_ptr, size)
+    if not def then
+        print("[Verify] ERROR: parse_sound_definition_from_memory returned nil")
+        return false
+    end
+    local new_bytes, new_data_size = parser.serialize_sound_definition(def)
+    if not new_bytes then
+        print("[Verify] ERROR: serialize_sound_definition returned nil")
+        return false
+    end
+
+    print(string.format("[Verify] parsed: num_channels=%d resource_id=%d data_offset=0x%X declared_data_size=%d",
+        def.num_channels, def.resource_id, def.data_offset, def.data_size))
+
+    local channel_sizes = {}
+    for i = 1, def.num_channels do
+        channel_sizes[i] = string.format("ch%d=%d", i - 1, def.channels[i] and def.channels[i].size or -1)
+    end
+    print("[Verify] channel sizes: " .. table.concat(channel_sizes, ", "))
+
+    -- 3. Length check. 'size' is the in-memory section span; new_data_size is
+    --    what the serializer wrote (declared data_size in the new header).
+    if #orig ~= #new_bytes then
+        print(string.format("[Verify] LENGTH MISMATCH: original=%d, serialized=%d (delta=%+d)",
+            #orig, #new_bytes, #new_bytes - #orig))
+    else
+        print(string.format("[Verify] length identical: %d bytes", #orig))
+    end
+
+    -- 4. Byte diff with hex window.
+    local max_diffs = 16
+    local diffs = 0
+    local lim = math.min(#orig, #new_bytes)
+    for i = 1, lim do
+        if orig:byte(i) ~= new_bytes:byte(i) then
+            diffs = diffs + 1
+            if diffs <= max_diffs then
+                local lo = math.max(1, i - 4)
+                local hi = math.min(lim, i + 4)
+                local o_hex, n_hex = {}, {}
+                for j = lo, hi do
+                    o_hex[#o_hex + 1] = string.format("%02X", orig:byte(j))
+                    n_hex[#n_hex + 1] = string.format("%02X", new_bytes:byte(j))
+                end
+                print(string.format("[Verify] DIFF @ 0x%04X: orig=0x%02X new=0x%02X  | orig[%s] new[%s]",
+                    i - 1, orig:byte(i), new_bytes:byte(i),
+                    table.concat(o_hex, " "), table.concat(n_hex, " ")))
+            end
+        end
+    end
+
+    -- 5. Structural re-parse: ensure serialized bytes re-parse identically.
+    local def2 = parser.parse_sound_definition_from_data(new_bytes, 0, #new_bytes)
+    if not def2 then
+        print("[Verify] WARN: re-parse of serialized bytes returned nil")
+    else
+        local mismatches = {}
+        if def2.num_channels ~= def.num_channels then
+            table.insert(mismatches,
+                string.format("num_channels %d->%d", def.num_channels, def2.num_channels))
+        end
+        if def2.data_size ~= new_data_size then
+            table.insert(mismatches,
+                string.format("data_size_written=%d  reparsed=%d", new_data_size, def2.data_size))
+        end
+        if def2.data_offset ~= def.data_offset then
+            table.insert(mismatches,
+                string.format("data_offset 0x%X->0x%X", def.data_offset, def2.data_offset))
+        end
+        for i = 1, def.num_channels do
+            local a = def.channels[i] and def.channels[i].size or -1
+            local b = def2.channels[i] and def2.channels[i].size or -1
+            if a ~= b then
+                table.insert(mismatches, string.format("ch%d.size %d->%d", i - 1, a, b))
+            end
+        end
+        if #mismatches == 0 then
+            print("[Verify] structural re-parse identical")
+        else
+            print("[Verify] structural drift: " .. table.concat(mismatches, ", "))
+        end
+    end
+
+    local ok = (diffs == 0) and (#orig == #new_bytes)
+    if ok then
+        print("[Verify] RESULT: BYTE-IDENTICAL round-trip (parser/serializer is innocent)")
+    else
+        print(string.format("[Verify] RESULT: %d byte differences, length delta %d (parser/serializer IS modifying bytes)",
+            diffs, #new_bytes - #orig))
+    end
+    return ok
+end
+
+--------------------------------------------------------------------------------
+-- ee_dump_audio_globals: Print the global pointers the SPU/sequencer reads
+-- to find the loaded effect's sound data. Useful for snapshotting before vs
+-- after a patch cycle to detect stale/clobbered globals outside the per-effect
+-- memory region (the .bin save only covers [base..base+EFFECT_MAX_SIZE]).
+--
+-- Addresses verified in research/effect_sound/working_documents and
+-- capture/opcode_capture.lua:55.
+--------------------------------------------------------------------------------
+
+local AUDIO_GLOBALS = {
+    {addr = 0x801BBF74, name = "g_sound_section_ptr (feds ptr)"},
+    {addr = 0x801BBF78, name = "sprite_def_table_ptr (frames+4)"},
+    {addr = 0x801BC0C8, name = "g_timeline_ptr"},
+    {addr = 0x801BC0DC, name = "g_sound_data_base (SPU bank)"},
+    {addr = 0x801BACC8, name = "g_effect_flags_ptr"},
+    {addr = 0x801B9250, name = "sound_call_count"},
+}
+
+function M.ee_dump_audio_globals()
+    if not MemUtils then
+        print("[Globals] ERROR: MemUtils not injected")
+        return nil
+    end
+    MemUtils.refresh_mem()
+    print("[Globals] === audio-related global pointers ===")
+    local snapshot = {}
+    for _, g in ipairs(AUDIO_GLOBALS) do
+        local v = MemUtils.read32(g.addr)
+        snapshot[g.addr] = v
+        print(string.format("  0x%08X  %-36s = 0x%08X", g.addr, g.name, v))
+    end
+    return snapshot
+end
+
+-- Snapshot globals, run a single apply pass, snapshot again, diff.
+-- Run *after* a freshly reloaded savestate so we're comparing
+-- "clean state" → "post-apply state".
+function M.ee_diff_globals_around_apply()
+    if not MemUtils or not apply_all_edits_fn then
+        print("[GlobalsDiff] ERROR: dependencies not ready")
+        return false
+    end
+    print("[GlobalsDiff] === BEFORE apply ===")
+    local before = M.ee_dump_audio_globals()
+
+    apply_all_edits_fn(true)  -- silent
+
+    MemUtils.refresh_mem()
+    print("[GlobalsDiff] === AFTER apply ===")
+    local after = M.ee_dump_audio_globals()
+
+    local changed = 0
+    for _, g in ipairs(AUDIO_GLOBALS) do
+        if before[g.addr] ~= after[g.addr] then
+            changed = changed + 1
+            print(string.format("[GlobalsDiff] CHANGED 0x%08X %s: 0x%08X -> 0x%08X",
+                g.addr, g.name, before[g.addr], after[g.addr]))
+        end
+    end
+    if changed == 0 then
+        print("[GlobalsDiff] no audio-related globals changed by apply")
+    else
+        print(string.format("[GlobalsDiff] %d global(s) changed by apply", changed))
+    end
+    return changed == 0
 end
 
 --------------------------------------------------------------------------------
@@ -351,8 +584,10 @@ function M.ee_capture_audio_start()
 
     print("[AudioCapture] Breakpoint armed, running test cycle...")
 
-    -- Run test cycle (async - uses nextTick)
-    M.ee_test()
+    -- Run test cycle (async - uses nextTick).
+    -- Capture mode opts in to the music-mute MIPS hook so the WAV doesn't
+    -- contain music bleed; ee_test does not install it by default anymore.
+    M.ee_test({install_mute_hook = true})
 
     print("[AudioCapture] Test cycle started. Call ee_capture_audio_read() after effect completes.")
     return true

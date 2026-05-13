@@ -89,10 +89,9 @@ function M.ee_load_session(name, no_autoplay)
 
                     -- Load .bin file and parse directly from it (not from PSX memory)
                     local bin_path = config.EFFECT_BINS_PATH .. name .. ".bin"
-                    local bin_path_win = bin_path:gsub("/", "\\")
-                    logging.log(string.format("  Looking for .bin: %s", bin_path_win))
+                    logging.log(string.format("  Looking for .bin: %s", bin_path))
 
-                    local bin_file = io.open(bin_path_win, "rb")
+                    local bin_file = io.open(bin_path, "rb")
                     if bin_file then
                         local bin_data = bin_file:read("*all")
                         bin_file:close()
