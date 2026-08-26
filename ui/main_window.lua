@@ -101,6 +101,7 @@ local function draw_top_control_bar()
                 test_cycle_fn({
                     skip_patching = EFFECT_EDITOR.test_no_patch,
                     dry_writes = EFFECT_EDITOR.test_dry_writes,
+                    prime_sfx_residue = EFFECT_EDITOR.test_prime_sfx_residue,
                 })
             end
             EFFECT_EDITOR.auto_loop_timer = EFFECT_EDITOR.auto_loop_seconds
@@ -118,6 +119,9 @@ local function draw_top_control_bar()
         imgui.SameLine()
         c, v = imgui.Checkbox("Dry writes", EFFECT_EDITOR.test_dry_writes)
         if c then EFFECT_EDITOR.test_dry_writes = v end
+        imgui.SameLine()
+        c, v = imgui.Checkbox("Prime SFX", EFFECT_EDITOR.test_prime_sfx_residue)
+        if c then EFFECT_EDITOR.test_prime_sfx_residue = v end
     else
         -- Show placeholder text when not ready
         imgui.TextUnformatted("(Load effect first)")

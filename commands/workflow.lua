@@ -150,6 +150,87 @@ function M.ee_test(opts)
             if not quiet then logging.log("  Music mute hook installed (effects preserved)") end
         end
 
+        -- Prime SFX-voice "previous-voice residue" so the runtime gate at
+        -- RAM 0x80150AB0 doesn't mute voices whose predecessor happens to
+        -- be cold in this savestate.
+        --
+        -- Background: that gate reads `lhu chan_prev+0x08` and clears the
+        -- current voice's chan+0x92 (the vol-formula multiplier) iff the
+        -- value is 0 or 0x011B. silenceAllVoices() resets SPU envelopes
+        -- but not WRAM channel structs, so chan+0x08 enters the test cycle
+        -- at whatever the savestate captured — typically 0 for SFX slot
+        -- pairs that hadn't been exercised. Real PSX gameplay reaches each
+        -- effect from arbitrary prior states; the residue is rarely 0.
+        --
+        -- We patch only voices marked SFX (chan+0x0B == 0x20) and only
+        -- when the residue is currently 0 — leaves music voices and
+        -- voices with genuine residue alone. Value 0x010E mirrors the
+        -- runtime-observed residue on voices 16/17 in our captures.
+        --
+        -- See research/effect_sound/working_documents/VOICE_19_CHAN_08_SAVESTATE_RESIDUE.md.
+        local prime_enabled = opts.prime_sfx_residue
+        if prime_enabled == nil then
+            prime_enabled = EFFECT_EDITOR.test_prime_sfx_residue
+            if prime_enabled == nil then prime_enabled = true end
+        end
+        if prime_enabled then
+            -- Cover every voice whose chan+0x08 could be read as a
+            -- "predecessor" by the gate when an SFX-pool voice plays.
+            -- The predecessor relationship is fixed by RAM layout: voice
+            -- N's gate reads voice N-1's chan+0x08. So if any SFX effect
+            -- plays on voice K (K∈[16,21]), voice K-1's chan+0x08 matters.
+            -- That extends the prime range down to v15 (predecessor of
+            -- v16, which lives outside the labeled SFX pool — marker
+            -- byte = 0x00 in our captures).
+            --
+            -- Accept marker 0x20 (labeled SFX) or 0x00 (uninitialized /
+            -- pool-boundary voice 15). Skip 0x80 (MUSIC) to avoid
+            -- perturbing music voices.
+            local PRIME_TARGETS = {
+                {voice = 15, base = 0x8003703A},  -- predecessor of v16; marker may be 0x00
+                {voice = 16, base = 0x8003719A},
+                {voice = 17, base = 0x800372FA},
+                {voice = 18, base = 0x8003745A},
+                {voice = 19, base = 0x800375BA},
+                {voice = 20, base = 0x8003771A},
+                {voice = 21, base = 0x8003787A},
+                -- voices 22, 23 are MUSIC (marker = 0x80); skip
+            }
+            local PRIME_LO, PRIME_HI = 0x0E, 0x01  -- composite halfword 0x010E
+            local SENTINEL_011B = 0x011B          -- second value the gate clears on
+            MemUtils.refresh_mem()
+            local patched, skipped_music, skipped_residue = 0, 0, 0
+            for _, entry in ipairs(PRIME_TARGETS) do
+                local marker = MemUtils.read8(entry.base + 0x0B) or 0
+                local lo = MemUtils.read8(entry.base + 0x08) or 0
+                local hi = MemUtils.read8(entry.base + 0x09) or 0
+                local halfword = lo + hi * 0x100
+                local would_trigger_gate = (halfword == 0) or (halfword == SENTINEL_011B)
+                if marker == 0x80 then
+                    skipped_music = skipped_music + 1
+                elseif not would_trigger_gate then
+                    -- Genuine non-zero, non-0x011B residue — preserve it.
+                    skipped_residue = skipped_residue + 1
+                elseif marker == 0x20 or marker == 0x00 then
+                    MemUtils.write8(entry.base + 0x08, PRIME_LO)
+                    MemUtils.write8(entry.base + 0x09, PRIME_HI)
+                    patched = patched + 1
+                    if not quiet then
+                        local why = (halfword == 0) and "was 0x0000" or "was 0x011B"
+                        local mlabel = (marker == 0x20) and "SFX" or "uninit"
+                        logging.log(string.format(
+                            "  Primed v%d chan+0x08 = 0x010E  (base 0x%08X, %s, marker %s)",
+                            entry.voice, entry.base, why, mlabel))
+                    end
+                end
+            end
+            if not quiet then
+                logging.log(string.format(
+                    "  Prime SFX residue: %d patched, %d preserved (genuine residue), %d skipped (music)",
+                    patched, skipped_residue, skipped_music))
+            end
+        end
+
         -- Step 3: Resume emulator
         if not quiet then logging.log("Step 3: Resuming emulator...") end
         PCSX.resumeEmulator()
@@ -802,6 +883,32 @@ function M.ee_load_sound_from_bin(bin_path)
         end
     end
 
+    -- TIER 3.5: Effect script bytecode (script_data section), raw byte
+    -- copy. Parse→serialize round-trip via the script parser is not
+    -- byte-identical for all bins, which corrupts the host's RAM and
+    -- stalls the runtime. Raw byte copy preserves source exactly.
+    -- Writes happen immediately (no go-through ee_apply) so the
+    -- already-parsed EFFECT_EDITOR.script_instructions (host's parse)
+    -- isn't touched — apply_all_edits_to_memory will re-serialize and
+    -- write the HOST's script (round-trip safe because it matches what
+    -- was just loaded from memory), and then we OVERWRITE that with
+    -- the source's raw bytes right after via ee_apply_script_raw.
+    local script_size = header.effect_data_ptr - header.script_data_ptr
+    if script_size > 0 then
+        local script_offset = base_offset + header.script_data_ptr
+        local script_bytes = data:sub(script_offset + 1, script_offset + script_size)
+        EFFECT_EDITOR._pending_script_raw = {
+            bytes = script_bytes,
+            size = script_size,
+            -- Target offset in host memory is the HOST's script_data_ptr
+            -- (read from EFFECT_EDITOR.header at apply time). Don't pin
+            -- it here in case the apply phase shifts sections first.
+        }
+        print(string.format(
+            "[Workflow]   Pending raw script copy: %d bytes (call ee_apply_script_raw after ee_apply)",
+            script_size))
+    end
+
     -- Phase timing from timeline header
     local source_timeline_header = parser.parse_timeline_header_from_data(data, timeline_ptr)
     if source_timeline_header and EFFECT_EDITOR.timeline_header then
@@ -816,6 +923,240 @@ function M.ee_load_sound_from_bin(bin_path)
 
     print("[Workflow] Sound data loaded successfully")
     write_bridge_response("OK:loaded_sound")
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- Force-single-target patch — clamp the for-each spawn loop to 1 instance.
+--
+-- effect_context_value @ 0x801BAD0C is the global target count the FFT
+-- effect runtime uses as the upper bound for the for-each spawn loop
+-- (see research/wiki_articles/effect_state.txt §"3-PHASE LAYOUT" and
+-- research/context_restore/CAMERA_DEBUG_9_EMITTERS.md). When an AoE
+-- ability like Disillusion is captured mid-cast, the savestate has
+-- this set to N (one per hit target), and the runtime will spawn N
+-- per-target for-each EffectState instances on resume.
+--
+-- For audio-parity captures we don't want that — extra for-each spawns
+-- produce overlapping play_sound calls that drift between PCSX and
+-- Godot (Godot's spawn handling diverges; see
+-- research/effect_sound/working_documents/PROBE_FORMULA_STAGES_PRE_ANCHOR_GATE_DEFICIT.md
+-- and related deficit docs). Writing 1 here BEFORE the runtime reads
+-- it clamps spawning to a single instance, giving a clean single-target
+-- audio capture that is easy to A/B against any host savestate.
+--
+-- The runtime reads this at the start of the spawn loop in
+-- outer_phases_timeline_tick. Patching while the emulator is paused
+-- post-savestate-load (i.e. before resume) takes effect immediately
+-- on the next IRQ.
+--
+-- Usage:
+--   ee_force_single_target()             -- clamps to 1 (default)
+--   ee_force_single_target(N)            -- clamps to N
+-- Returns true on success, false on failure.
+--------------------------------------------------------------------------------
+-- Apply pending raw script bytes from ee_load_sound_from_bin into PSX
+-- memory. Separate from ee_apply because the script-parser
+-- round-trip is not byte-identical for all bins, so we keep
+-- EFFECT_EDITOR.script_instructions = host's (matches what
+-- ee_apply serializes back unchanged) and overwrite the script
+-- section with the source's RAW bytes right after.
+--
+-- Caller pattern (orchestrator-side):
+--   ee_load_sound_from_bin(src)
+--   ee_apply()              -- writes host's data back (no-op for sound; the sound bytes
+--                              come from EFFECT_EDITOR.sound_definition which IS source's)
+--   ee_apply_script_raw()   -- raw-copy source's script bytes over host's script slot
+function M.ee_apply_script_raw()
+    local pending = EFFECT_EDITOR._pending_script_raw
+    if not pending or not pending.bytes then
+        return true  -- nothing to do
+    end
+    if not EFFECT_EDITOR.memory_base or EFFECT_EDITOR.memory_base < 0x80000000 then
+        print("[Workflow] ee_apply_script_raw: no valid memory_base")
+        return false
+    end
+    if not EFFECT_EDITOR.header or not EFFECT_EDITOR.header.script_data_ptr then
+        print("[Workflow] ee_apply_script_raw: no script_data_ptr in EFFECT_EDITOR.header")
+        return false
+    end
+    -- Re-read header from memory to pick up any post-apply section shifts.
+    MemUtils.refresh_mem()
+    local mem_header = parser.parse_header_from_memory(EFFECT_EDITOR.memory_base)
+    local script_data_ptr = mem_header and mem_header.script_data_ptr
+                            or EFFECT_EDITOR.header.script_data_ptr
+    local effect_data_ptr = mem_header and mem_header.effect_data_ptr
+                            or EFFECT_EDITOR.header.effect_data_ptr
+    local dst_capacity = effect_data_ptr - script_data_ptr
+    if pending.size > dst_capacity then
+        print(string.format(
+            "[Workflow] ee_apply_script_raw: source script %d bytes won't fit host slot %d (would overflow into effect_data); skipping",
+            pending.size, dst_capacity))
+        EFFECT_EDITOR._pending_script_raw = nil
+        return false
+    end
+    local addr = EFFECT_EDITOR.memory_base + script_data_ptr
+    for i = 1, pending.size do
+        MemUtils.write8(addr + i - 1, pending.bytes:byte(i))
+    end
+    -- Zero-pad the remainder to avoid leftover host bytecode tail
+    -- decoding as opcodes.
+    for i = pending.size, dst_capacity - 1 do
+        MemUtils.write8(addr + i, 0)
+    end
+    print(string.format(
+        "[Workflow] ee_apply_script_raw: wrote %d source bytes at 0x%08X (slot %d, padded with %d zeros)",
+        pending.size, addr, dst_capacity, dst_capacity - pending.size))
+    EFFECT_EDITOR._pending_script_raw = nil
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- Extend phase2_delay — push the post-spawn tail of an effect so the
+-- for-each instances have time to finish playing audibly before the
+-- effect terminates. Useful for swap captures where the host's
+-- phase2_delay was tuned for a fast effect and would cut off a longer
+-- swapped-in spell.
+--
+-- phase2_delay lives in the timeline_section header at +0x0A (int16).
+-- Address = EFFECT_EDITOR.memory_base + EFFECT_EDITOR.header.timeline_section_ptr + 0x0A.
+-- Writing here directly takes effect on the next outer_phases_timeline_tick
+-- read (the runtime re-reads this field each frame). See
+-- research/wiki_articles/timeline_section.txt lines 274/997.
+--
+-- Usage:
+--   ee_extend_phase2()          -- default 300 frames (~10s @ 30fps)
+--   ee_extend_phase2(600)       -- 600 frames (~20s)
+-- Also mirrors the value into EFFECT_EDITOR.timeline_header so any
+-- subsequent ee_apply doesn't overwrite it.
+function M.ee_extend_phase2(frames)
+    frames = frames or 300
+    if frames < 0 or frames > 0x7FFF then
+        print(string.format(
+            "[Workflow] ee_extend_phase2: frames %d out of range (0..32767)",
+            frames))
+        return false
+    end
+    if not EFFECT_EDITOR.memory_base or EFFECT_EDITOR.memory_base < 0x80000000 then
+        print("[Workflow] ee_extend_phase2: no valid memory_base — load a session first")
+        return false
+    end
+    if not EFFECT_EDITOR.header or not EFFECT_EDITOR.header.timeline_section_ptr then
+        print("[Workflow] ee_extend_phase2: no timeline_section_ptr in EFFECT_EDITOR.header")
+        return false
+    end
+    local addr = EFFECT_EDITOR.memory_base + EFFECT_EDITOR.header.timeline_section_ptr + 0x0A
+    local ok, err = pcall(function()
+        MemUtils.refresh_mem()
+        local prev = MemUtils.read16(addr)
+        MemUtils.write16(addr, frames)
+        if EFFECT_EDITOR.timeline_header then
+            EFFECT_EDITOR.timeline_header.phase2_delay = frames
+        end
+        print(string.format(
+            "[Workflow] phase2_delay @ 0x%08X: %d -> %d (extend_phase2)",
+            addr, prev, frames))
+    end)
+    if not ok then
+        print("[Workflow] ee_extend_phase2 failed: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+--------------------------------------------------------------------------------
+-- Reset script_position on every active EffectState slot.
+-- Needed when overlaying a different effect's bytecode (raw script
+-- swap) so the runtime re-enters the new script from offset 0
+-- instead of mid-stream where the frozen savestate PC happens to be.
+-- EffectState +0x06 = script_position (int16), per
+-- research/wiki_articles/effect_state.txt §"SECTION 8: MEMORY LAYOUT".
+function M.ee_reset_script_position()
+    local EFFECT_STATE_BASE   = 0x801BF02C
+    local EFFECT_STATE_STRIDE = 0xF8
+    local ACTIVE_HEAD_ADDR    = 0x801BBF90
+    local SLOT_LIMIT          = 32
+    local ok, err = pcall(function()
+        MemUtils.refresh_mem()
+        local idx = MemUtils.read16(ACTIVE_HEAD_ADDR)
+        local visited = 0
+        while idx ~= 0 and idx ~= 0xFFFF and visited < SLOT_LIMIT do
+            local addr = EFFECT_STATE_BASE + idx * EFFECT_STATE_STRIDE
+            local prev = MemUtils.read16(addr + 0x06)
+            MemUtils.write16(addr + 0x06, 0)
+            print(string.format(
+                "[Workflow]   EffectState[%d] @ 0x%08X: script_position %d -> 0",
+                idx, addr, prev))
+            local next_idx = MemUtils.read16(addr + 0x00)
+            if next_idx == idx then break end
+            idx = next_idx
+            visited = visited + 1
+        end
+        print(string.format("[Workflow] script_position reset on %d slots", visited))
+    end)
+    if not ok then
+        print("[Workflow] ee_reset_script_position failed: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+function M.ee_force_single_target(target_count)
+    target_count = target_count or 1
+    if target_count < 1 or target_count > 0xFFFF then
+        print(string.format(
+            "[Workflow] ee_force_single_target: target_count %d out of range (1..65535)",
+            target_count))
+        return false
+    end
+    -- The for-each spawn loop in outer_phases_timeline_tick (opcode 41)
+    -- runs IFF `spawned_target_count < total_targets`. Two patches needed:
+    --   1. effect_context_value @ 0x801BAD0C = N     (the total_targets ref)
+    --   2. For every active EffectState slot, zero:
+    --        +0x2A for_each_spawn_delay   (countdown — 0 means spawn now)
+    --        +0x2C spawned_target_count   (already-spawned counter)
+    -- Without (2), savestates captured mid-effect (with spawn already in
+    -- progress) have spawned_target_count >= 1 — patching total_targets
+    -- to 1 alone makes the condition false and no spawn fires. See
+    -- research/wiki_articles/effect_state.txt §"3-PHASE LAYOUT" + §9.
+    local ADDR_CONTEXT = 0x801BAD0C
+    local EFFECT_STATE_BASE   = 0x801BF02C   -- effect_state_array_base
+    local EFFECT_STATE_STRIDE = 0xF8          -- per slot
+    local ACTIVE_HEAD_ADDR    = 0x801BBF90    -- active_effect_list_head
+    local SLOT_LIMIT          = 32            -- safety bound on linked-list walk
+    local ok, err = pcall(function()
+        MemUtils.refresh_mem()
+
+        local prev_ctx = MemUtils.read16(ADDR_CONTEXT)
+        MemUtils.write16(ADDR_CONTEXT, target_count)
+        print(string.format(
+            "[Workflow] effect_context_value @ 0x%08X: %d -> %d",
+            ADDR_CONTEXT, prev_ctx, target_count))
+
+        -- Walk the active EffectState list and zero the spawn counters.
+        local idx = MemUtils.read16(ACTIVE_HEAD_ADDR)
+        local visited = 0
+        while idx ~= 0 and idx ~= 0xFFFF and visited < SLOT_LIMIT do
+            local addr = EFFECT_STATE_BASE + idx * EFFECT_STATE_STRIDE
+            local prev_delay = MemUtils.read16(addr + 0x2A)
+            local prev_count = MemUtils.read16(addr + 0x2C)
+            MemUtils.write16(addr + 0x2A, 0)
+            MemUtils.write16(addr + 0x2C, 0)
+            print(string.format(
+                "[Workflow]   EffectState[%d] @ 0x%08X: for_each_spawn_delay %d -> 0, spawned_target_count %d -> 0",
+                idx, addr, prev_delay, prev_count))
+            local next_idx = MemUtils.read16(addr + 0x00)
+            if next_idx == idx then break end  -- self-loop guard
+            idx = next_idx
+            visited = visited + 1
+        end
+        print(string.format(
+            "[Workflow] active effect slots patched: %d", visited))
+    end)
+    if not ok then
+        print("[Workflow] ee_force_single_target failed: " .. tostring(err))
+        return false
+    end
     return true
 end
 

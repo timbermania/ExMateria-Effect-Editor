@@ -7,7 +7,7 @@
 --
 -- Pair this with sound_capture (per-trigger) + note_capture (per-SMD note)
 -- and you have a complete picture of what the game does to the SPU during
--- an effect. Compare against smd-player's Sequencer.player_trace.jsonl to
+-- an effect. Compare against exmateria-sound's Sequencer.player_trace.jsonl to
 -- find where synthesis diverges.
 
 local M = {}

@@ -390,6 +390,26 @@ ee_sound_debug_stop = sound_debug.ee_sound_debug_stop
 -- Sound data swap (load sound from different BIN file)
 ee_load_sound_from_bin = workflow.ee_load_sound_from_bin
 
+-- Companion to ee_load_sound_from_bin — overlays the source bin's
+-- raw script bytecode onto the host's script slot. Call AFTER ee_apply.
+ee_apply_script_raw = workflow.ee_apply_script_raw
+
+-- Reset script_position=0 on active EffectState slots — companion to
+-- ee_apply_script_raw so the runtime re-enters the new script from
+-- offset 0 instead of the frozen savestate PC.
+ee_reset_script_position = workflow.ee_reset_script_position
+
+-- Clamp for-each spawn count (effect_context_value @ 0x801BAD0C) — lets
+-- you patch a multi-target savestate (Disillusion, Bahamut, etc.) down
+-- to a clean single-target audio capture. See workflow.lua for the
+-- mechanism + addresses.
+ee_force_single_target = workflow.ee_force_single_target
+
+-- Push phase2_delay (timeline header +0x0A) to a large value so the
+-- for-each tail has time to play out without being cut off. See
+-- workflow.lua for the mechanism.
+ee_extend_phase2 = workflow.ee_extend_phase2
+
 --------------------------------------------------------------------------------
 -- Initialization
 --------------------------------------------------------------------------------

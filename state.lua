@@ -113,6 +113,11 @@ EFFECT_EDITOR = {
     test_verbose = false,       -- Show detailed [DEBUG] messages
     test_no_patch = false,      -- Test Effect button skips apply_all_edits (baseline sound check)
     test_dry_writes = false,    -- Test Effect button still calls apply but writes nothing (pause/refresh A/B)
+    test_prime_sfx_residue = true,  -- Prime previous-voice chan+0x08 residue for idle SFX
+                                    -- voices so the runtime gate at PC 0x80150AB0 doesn't mute
+                                    -- voices whose predecessor happens to be cold in the
+                                    -- savestate. See research/effect_sound/working_documents/
+                                    -- VOICE_19_CHAN_08_SAVESTATE_RESIDUE.md.
 
     -- Texture editing state
     texture_export_fingerprint = nil,  -- Hash of exported BMP (to detect changes)
@@ -220,6 +225,7 @@ function M.reset()
     EFFECT_EDITOR.test_verbose = false
     EFFECT_EDITOR.test_no_patch = false
     EFFECT_EDITOR.test_dry_writes = false
+    EFFECT_EDITOR.test_prime_sfx_residue = true
     EFFECT_EDITOR.texture_export_fingerprint = nil
     EFFECT_EDITOR.texture_width = 0
     EFFECT_EDITOR.texture_height = 0
